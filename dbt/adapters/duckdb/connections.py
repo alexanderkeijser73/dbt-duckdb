@@ -125,15 +125,6 @@ class DuckDBConnectionManager(SQLConnectionManager):
         with cls._LOCK:
             if cls._ENV is not None:
                 cls._ENV = None
-    
-    def execute(
-        self, sql: str, auto_begin: bool = False, fetch: bool = False, **kwargs
-    ) -> Tuple[AdapterResponse, Any]:
-        if fetch:
-            # We need to apply transpiling to fetched SQL; DDL/DML should have had
-            # translation applied at an earlier step in the sequence
-            sql = self.transpile(sql)
-        return super().execute(sql, auto_begin, fetch, **kwargs)
 
     def execute(
         self,
@@ -142,6 +133,10 @@ class DuckDBConnectionManager(SQLConnectionManager):
         fetch: bool = False,
         limit: Optional[int] = None,
     ) -> Tuple[AdapterResponse, "agate.Table"]:
+        if fetch:
+            # We need to apply transpiling to fetched SQL; DDL/DML should have had
+            # translation applied at an earlier step in the sequence
+            sql = self.transpile(sql)
         if self.disable_transactions:
             auto_begin = False
         return super().execute(sql, auto_begin, fetch, limit)
