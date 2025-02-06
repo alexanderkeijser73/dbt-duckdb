@@ -1,20 +1,37 @@
-
 {% macro duckdb__create_schema(relation) -%}
   {%- call statement('create_schema') -%}
-    create schema if not exists {{ relation.without_identifier().include(database=adapter.use_database()) }}
+    {% set sql %}
+        select type from duckdb_databases()
+        where lower(database_name)='{{ relation.database | lower }}'
+        and type='sqlite'
+    {% endset %}
+    {% set results = run_query(sql) %}
+    {% if results|length == 0 %}
+        create schema if not exists {{ relation.without_identifier() }}
+    {% else %}
+        {% if relation.schema!='main' %}
+            {{ exceptions.raise_compiler_error(
+                "Schema must be 'main' when writing to sqlite "
+                ~ "instead got " ~ relation.schema
+            )}}
+        {% endif %}
+    {% endif %}
   {%- endcall -%}
 {% endmacro %}
 
 {% macro duckdb__drop_schema(relation) -%}
   {%- call statement('drop_schema') -%}
-    drop schema if exists {{ relation.without_identifier().include(database=adapter.use_database()) }} cascade
+    drop schema if exists {{ relation.without_identifier() }} cascade
   {%- endcall -%}
 {% endmacro %}
 
 {% macro duckdb__list_schemas(database) -%}
   {% set sql %}
     select schema_name
-    from information_schema.schemata
+    from system.information_schema.schemata
+    {% if database is not none %}
+    where lower(catalog_name) = '{{ database | lower }}'
+    {% endif %}
   {% endset %}
   {{ return(run_query(sql)) }}
 {% endmacro %}
@@ -22,8 +39,9 @@
 {% macro duckdb__check_schema_exists(information_schema, schema) -%}
   {% set sql -%}
         select count(*)
-        from information_schema.schemata
-        where schema_name='{{ schema }}'
+        from system.information_schema.schemata
+        where lower(schema_name) = '{{ schema | lower }}'
+        and lower(catalog_name) = '{{ information_schema.database | lower }}'
   {%- endset %}
   {{ return(run_query(sql)) }}
 {% endmacro %}
@@ -51,7 +69,7 @@
     {{ sql_header if sql_header is not none }}
 
     create {% if temporary: -%}temporary{%- endif %} table
-      {{ relation.include(database=(not temporary and adapter.use_database()), schema=(not temporary)) }}
+      {{ relation.include(database=(not temporary), schema=(not temporary)) }}
   {% if contract_config.enforced and not temporary %}
     {#-- DuckDB doesnt support constraints on temp tables --#}
     {{ get_table_columns_and_constraints() }} ;
@@ -83,7 +101,10 @@ def materialize(df, con):
         if pyarrow_available and isinstance(df, pyarrow.Table):
             # https://github.com/duckdb/duckdb/issues/6584
             import pyarrow.dataset
-    con.execute('create table {{ relation.include(database=adapter.use_database()) }} as select * from df')
+    tmp_name = '__dbt_python_model_df_' + '{{ relation.identifier }}'
+    con.register(tmp_name, df)
+    con.execute('create table {{ relation }} as select * from ' + tmp_name)
+    con.unregister(tmp_name)
 {% endmacro %}
 
 {% macro duckdb__create_view_as(relation, sql) -%}
@@ -108,11 +129,14 @@ def materialize(df, con):
           numeric_precision,
           numeric_scale
 
-      from information_schema.columns
+      from system.information_schema.columns
       where table_name = '{{ relation.identifier }}'
-        {% if relation.schema %}
-        and table_schema = '{{ relation.schema }}'
-        {% endif %}
+      {% if relation.schema %}
+      and lower(table_schema) = '{{ relation.schema | lower }}'
+      {% endif %}
+      {% if relation.database %}
+      and lower(table_catalog) = '{{ relation.database | lower }}'
+      {% endif %}
       order by ordinal_position
 
   {% endcall %}
@@ -131,21 +155,16 @@ def materialize(df, con):
         WHEN 'VIEW' THEN 'view'
         WHEN 'LOCAL TEMPORARY' THEN 'table'
         END as type
-    from information_schema.tables
-    where table_schema = '{{ schema_relation.schema }}'
+    from system.information_schema.tables
+    where lower(table_schema) = '{{ schema_relation.schema | lower }}'
+    and lower(table_catalog) = '{{ schema_relation.database | lower }}'
   {% endcall %}
   {{ return(load_result('list_relations_without_caching').table) }}
 {% endmacro %}
 
 {% macro duckdb__drop_relation(relation) -%}
   {% call statement('drop_relation', auto_begin=False) -%}
-    drop {{ relation.type }} if exists {{ relation.include(database=adapter.use_database()) }} cascade
-  {%- endcall %}
-{% endmacro %}
-
-{% macro duckdb__truncate_relation(relation) -%}
-  {% call statement('truncate_relation') -%}
-    DELETE FROM {{ relation.include(database=adapter.use_database()) }} WHERE 1=1
+    drop {{ relation.type }} if exists {{ relation }} cascade
   {%- endcall %}
 {% endmacro %}
 
@@ -183,14 +202,6 @@ def materialize(df, con):
   {% do return(get_incremental_delete_insert_sql(arg_dict)) %}
 {% endmacro %}
 
-{% macro duckdb__get_incremental_delete_insert_sql(arg_dict) %}
-  {% do return(get_delete_insert_merge_sql(arg_dict["target_relation"].include(database=adapter.use_database()), arg_dict["temp_relation"], arg_dict["unique_key"], arg_dict["dest_columns"])) %}
-{% endmacro %}
-
-{% macro duckdb__get_incremental_append_sql(arg_dict) %}
-  {% do return(get_insert_into_sql(arg_dict["target_relation"].include(database=adapter.use_database()), arg_dict["temp_relation"], arg_dict["dest_columns"])) %}
-{% endmacro %}
-
 {% macro location_exists(location) -%}
   {% do return(adapter.location_exists(location)) %}
 {% endmacro %}
@@ -201,21 +212,19 @@ def materialize(df, con):
   {%- endcall %}
 {% endmacro %}
 
-{% macro register_glue_table(register, glue_database, relation, location, format) -%}
-  {% if location.startswith("s3://") and register == true %}
-    {%- set column_list = adapter.get_columns_in_relation(relation) -%}
-    {% do adapter.register_glue_table(glue_database, relation.identifier, column_list, location, format) %}
-  {% endif %}
+{% macro store_relation(plugin, relation, location, format, config) -%}
+  {%- set column_list = adapter.get_columns_in_relation(relation) -%}
+  {% do adapter.store_relation(plugin, relation, column_list, location, format, config) %}
 {% endmacro %}
 
 {% macro render_write_options(config) -%}
   {% set options = config.get('options', {}) %}
+  {% if options is not mapping %}
+    {% do exceptions.raise_compiler_error("The options argument must be a dictionary") %}
+  {% endif %}
+
   {% for k in options %}
-    {% if options[k] is string %}
-      {% set _ = options.update({k: render(options[k])}) %}
-    {% else %}
-      {% set _ = options.update({k: render(options[k])}) %}
-    {% endif %}
+    {% set _ = options.update({k: render(options[k])}) %}
   {% endfor %}
 
   {# legacy top-level write options #}
@@ -228,3 +237,10 @@ def materialize(df, con):
 
   {% do return(options) %}
 {%- endmacro %}
+
+{% macro duckdb__apply_grants(relation, grant_config, should_revoke=True) %}
+    {#-- If grant_config is {} or None, this is a no-op --#}
+    {% if grant_config %}
+      {{ adapter.warn_once('Grants for relations are not supported by DuckDB') }}
+    {% endif %}
+{% endmacro %}

@@ -1,18 +1,35 @@
 import os
+import resource
 import subprocess
 import time
+from importlib import metadata
 
 import duckdb
 import pytest
 
+# Increase the number of open files allowed
+# Hack for https://github.com/dbt-labs/dbt-core/issues/7316
+soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (hard_limit, hard_limit))
 
 # Import the standard functional fixtures as a plugin
 # Note: fixtures with session scope need to be local
 pytest_plugins = ["dbt.tests.fixtures.project"]
 
+MOTHERDUCK_TOKEN = "MOTHERDUCK_TOKEN"
+TEST_MOTHERDUCK_TOKEN = "TEST_MOTHERDUCK_TOKEN"
+
 
 def pytest_addoption(parser):
     parser.addoption("--profile", action="store", default="memory", type=str)
+
+
+def pytest_report_header() -> list[str]:
+    """Return a list of strings to be displayed in the header of the report."""
+    return [
+        f"duckdb: {metadata.version('duckdb')}",
+        f"dbt-core: {metadata.version('dbt-core')}",
+    ]
 
 
 @pytest.fixture(scope="session")
@@ -40,13 +57,9 @@ def bv_server_process(profile_type):
 
 # The profile dictionary, used to write out profiles.yml
 # dbt will supply a unique schema per test, so we do not specify 'schema' here
-@pytest.fixture(scope="class")
-def dbt_profile_target(profile_type, bv_server_process, tmp_path_factory):
+@pytest.fixture(scope="session")
+def dbt_profile_target(profile_type, bv_server_process, tmpdir_factory):
     profile = {"type": "duckdb", "threads": 4}
-
-    if duckdb.__version__ > "0.7.1":
-        # for backwards compatibility
-        profile["settings"] = {"integer_division": True}
 
     if profile_type == "buenavista":
         profile["database"] = "memory"
@@ -56,8 +69,21 @@ def dbt_profile_target(profile_type, bv_server_process, tmp_path_factory):
             "user": "test",
         }
     elif profile_type == "file":
-        profile["path"] = str(tmp_path_factory.getbasetemp() / "tmp.db")
-    elif profile_type == "memory":
+        profile["path"] = str(tmpdir_factory.mktemp("dbs") / "tmp.db")
+    elif profile_type == "md":
+        # Test against MotherDuck
+        if MOTHERDUCK_TOKEN not in os.environ and MOTHERDUCK_TOKEN.lower() not in os.environ:
+            if TEST_MOTHERDUCK_TOKEN not in os.environ:
+                raise ValueError(
+                    f"Please set the {MOTHERDUCK_TOKEN} or {TEST_MOTHERDUCK_TOKEN} \
+                        environment variable to run tests against MotherDuck"
+                )
+            profile["token"] = os.environ.get(TEST_MOTHERDUCK_TOKEN)
+        else:
+            profile["token"] = os.environ.get(MOTHERDUCK_TOKEN, os.environ.get(MOTHERDUCK_TOKEN.lower()))
+        profile["disable_transactions"] = True
+        profile["path"] = "md:test"
+    elif profile_type in ["memory", "nightly"]:
         pass  # use the default path-less profile
     else:
         raise ValueError(f"Invalid profile type '{profile_type}'")
@@ -65,7 +91,7 @@ def dbt_profile_target(profile_type, bv_server_process, tmp_path_factory):
     return profile
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture(autouse=True, scope="class")
 def skip_by_profile_type(profile_type, request):
     if request.node.get_closest_marker("skip_profile"):
         for skip_profile_type in request.node.get_closest_marker("skip_profile").args:

@@ -1,9 +1,10 @@
 import unittest
 from argparse import Namespace
+from unittest import mock
 
 from dbt.flags import set_from_args
 from dbt.adapters.duckdb import DuckDBAdapter
-from tests.unit.utils import config_from_parts_or_dicts, mock_connection
+from tests.unit.utils import config_from_parts_or_dicts
 
 class TestExternalUtils(unittest.TestCase):
     def setUp(self):
@@ -32,8 +33,9 @@ class TestExternalUtils(unittest.TestCase):
 
     @property
     def adapter(self):
+        self.mock_mp_context = mock.MagicMock()
         if self._adapter is None:
-            self._adapter = DuckDBAdapter(self.config)
+            self._adapter = DuckDBAdapter(self.config, self.mock_mp_context)
         return self._adapter
 
     def test_external_write_options(self):

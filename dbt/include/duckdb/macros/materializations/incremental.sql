@@ -1,6 +1,8 @@
 {% materialization incremental, adapter="duckdb", supported_languages=['sql', 'python'] -%}
 
   {%- set language = model['language'] -%}
+  -- only create temp tables if using local duckdb, as it is not currently supported for remote databases
+  {%- set temporary = not adapter.is_motherduck() -%}
 
   -- relations
   {%- set existing_relation = load_cached_relation(this) -%}
@@ -39,13 +41,20 @@
     {% set build_sql = create_table_as(False, intermediate_relation, compiled_code, language) %}
     {% set need_swap = true %}
   {% else %}
+    {% if not temporary %}
+      -- if not using a temporary table we will update the temp relation to use a different temp schema ("dbt_temp" by default)
+      {% set temp_relation = temp_relation.incorporate(path=adapter.get_temp_relation_path(this)) %}
+      {% do run_query(create_schema(temp_relation)) %}
+      -- then drop the temp relation after we insert the incremental data into the target relation
+      {% do to_drop.append(temp_relation) %}
+    {% endif %}
     {% if language == 'python' %}
       {% set build_python = create_table_as(False, temp_relation, compiled_code, language) %}
       {% call statement("pre", language=language) %}
         {{- build_python }}
       {% endcall %}
     {% else %} {# SQL #}
-      {% do run_query(create_table_as(True, temp_relation, compiled_code, language)) %}
+      {% do run_query(create_table_as(temporary, temp_relation, compiled_code, language)) %}
     {% endif %}
     {% do adapter.expand_target_column_types(
              from_relation=temp_relation,
@@ -58,9 +67,9 @@
 
     {#-- Get the incremental_strategy, the macro to use for the strategy, and build the sql --#}
     {% set incremental_strategy = config.get('incremental_strategy') or 'default' %}
-    {% set incremental_predicates = config.get('incremental_predicates', none) %}
+    {% set incremental_predicates = config.get('predicates', none) or config.get('incremental_predicates', none) %}
     {% set strategy_sql_macro_func = adapter.get_incremental_strategy_macro(context, incremental_strategy) %}
-    {% set strategy_arg_dict = ({'target_relation': target_relation, 'temp_relation': temp_relation, 'unique_key': unique_key, 'dest_columns': dest_columns, 'predicates': incremental_predicates }) %}
+    {% set strategy_arg_dict = ({'target_relation': target_relation, 'temp_relation': temp_relation, 'unique_key': unique_key, 'dest_columns': dest_columns, 'incremental_predicates': incremental_predicates }) %}
     {% set build_sql = strategy_sql_macro_func(strategy_arg_dict) %}
     {% set language = "sql" %}
 

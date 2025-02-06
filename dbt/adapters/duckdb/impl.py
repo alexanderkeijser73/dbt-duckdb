@@ -1,28 +1,45 @@
 import os
+from collections import defaultdict
+from typing import Any
 from typing import List
 from typing import Optional
 from typing import Sequence
+from typing import TYPE_CHECKING
+from uuid import uuid4
 
-import agate
-import duckdb
+from dbt_common.contracts.constraints import ColumnLevelConstraint
+from dbt_common.contracts.constraints import ConstraintType
+from dbt_common.exceptions import DbtInternalError
+from dbt_common.exceptions import DbtRuntimeError
 
 from dbt.adapters.base import BaseRelation
-from dbt.adapters.base.column import Column
+from dbt.adapters.base.column import Column as BaseColumn
 from dbt.adapters.base.impl import ConstraintSupport
 from dbt.adapters.base.meta import available
+from dbt.adapters.contracts.connection import AdapterResponse
+from dbt.adapters.contracts.relation import Path
+from dbt.adapters.contracts.relation import RelationType
+from dbt.adapters.duckdb.column import DuckDBColumn
 from dbt.adapters.duckdb.connections import DuckDBConnectionManager
-from dbt.adapters.duckdb.glue import create_or_update_table
 from dbt.adapters.duckdb.relation import DuckDBRelation
+from dbt.adapters.duckdb.utils import TargetConfig
+from dbt.adapters.duckdb.utils import TargetLocation
+from dbt.adapters.events.logging import AdapterLogger
 from dbt.adapters.sql import SQLAdapter
-from dbt.contracts.connection import AdapterResponse
-from dbt.contracts.graph.nodes import ColumnLevelConstraint
-from dbt.contracts.graph.nodes import ConstraintType
-from dbt.exceptions import DbtInternalError
-from dbt.exceptions import DbtRuntimeError
+
+
+TEMP_SCHEMA_NAME = "temp_schema_name"
+DEFAULT_TEMP_SCHEMA_NAME = "dbt_temp"
+
+if TYPE_CHECKING:
+    import agate
+
+logger = AdapterLogger("DuckDB")
 
 
 class DuckDBAdapter(SQLAdapter):
     ConnectionManager = DuckDBConnectionManager
+    Column = DuckDBColumn
     Relation = DuckDBRelation
 
     CONSTRAINT_SUPPORT = {
@@ -33,20 +50,33 @@ class DuckDBAdapter(SQLAdapter):
         ConstraintType.foreign_key: ConstraintSupport.ENFORCED,
     }
 
+    # can be overridden via the model config metadata
+    _temp_schema_name = DEFAULT_TEMP_SCHEMA_NAME
+    _temp_schema_model_uuid: dict[str, str] = defaultdict(lambda: str(uuid4()).split("-")[-1])
+
     @classmethod
     def date_function(cls) -> str:
         return "now()"
 
     @classmethod
     def is_cancelable(cls) -> bool:
-        return False
+        return cls.ConnectionManager.env().is_cancelable()
+
+    def debug_query(self):
+        self.execute("select 1 as id")
+
+    @available
+    def is_motherduck(self):
+        return self.config.credentials.is_motherduck
 
     @available
     def transpile(self, sql: str) -> str:
         return self.connections.transpile(sql)
 
     @available
-    def convert_datetimes_to_strs(self, table: agate.Table) -> agate.Table:
+    def convert_datetimes_to_strs(self, table: "agate.Table") -> "agate.Table":
+        import agate
+
         for column in table.columns:
             if isinstance(column.data_type, agate.DateTime):
                 table = table.compute(
@@ -61,6 +91,10 @@ class DuckDBAdapter(SQLAdapter):
         return table
 
     @available
+    def get_seed_file_path(self, model) -> str:
+        return os.path.join(model["root_path"], model["original_file_path"])
+
+    @available
     def location_exists(self, location: str) -> bool:
         try:
             self.execute(
@@ -73,34 +107,37 @@ class DuckDBAdapter(SQLAdapter):
             return False
 
     @available
-    def register_glue_table(
+    def store_relation(
         self,
-        glue_database: str,
-        table: str,
-        column_list: Sequence[Column],
-        location: str,
-        file_format: str,
+        plugin_name: str,
+        relation: DuckDBRelation,
+        column_list: Sequence[BaseColumn],
+        path: str,
+        format: str,
+        config: Any,
     ) -> None:
-        create_or_update_table(
-            database=glue_database,
-            table=table,
+        target_config = TargetConfig(
+            relation=relation,
             column_list=column_list,
-            s3_path=location,
-            file_format=file_format,
-            settings=self.config.credentials.settings,
+            config=config,
+            location=TargetLocation(path=path, format=format),
         )
+        DuckDBConnectionManager.env().store_relation(plugin_name, target_config)
 
     @available
     def external_root(self) -> str:
         return self.config.credentials.external_root
 
     @available
-    def use_database(self) -> bool:
-        return duckdb.__version__ >= "0.7.0"
-
-    @available
     def get_binding_char(self):
         return DuckDBConnectionManager.env().get_binding_char()
+
+    @available
+    def catalog_comment(self, prefix):
+        if DuckDBConnectionManager.env().supports_comments():
+            return f"{prefix}.comment"
+        else:
+            return "''"
 
     @available
     def external_write_options(self, write_location: str, rendered_options: dict) -> str:
@@ -137,12 +174,18 @@ class DuckDBAdapter(SQLAdapter):
 
     @available
     def external_read_location(self, write_location: str, rendered_options: dict) -> str:
-        if rendered_options.get("partition_by"):
+        if rendered_options.get("partition_by") or rendered_options.get("per_thread_output"):
             globs = [write_location, "*"]
-            partition_by = str(rendered_options.get("partition_by"))
-            globs.extend(["*"] * len(partition_by.split(",")))
+            if rendered_options.get("partition_by"):
+                partition_by = str(rendered_options.get("partition_by"))
+                globs.extend(["*"] * len(partition_by.split(",")))
             return ".".join(["/".join(globs), str(rendered_options.get("format", "parquet"))])
         return write_location
+
+    @available
+    def warn_once(self, msg: str):
+        """Post a warning message once per dbt execution."""
+        DuckDBConnectionManager.warn_once(msg)
 
     def valid_incremental_strategies(self) -> Sequence[str]:
         """DuckDB does not currently support MERGE statement."""
@@ -192,7 +235,7 @@ class DuckDBAdapter(SQLAdapter):
         return sql
 
     @available.parse(lambda *a, **k: [])
-    def get_column_schema_from_query(self, sql: str) -> List[Column]:
+    def get_column_schema_from_query(self, sql: str) -> List[BaseColumn]:
         """Get a list of the Columns with names and data types from the given sql."""
 
         # Taking advantage of yet another amazing DuckDB SQL feature right here: the
@@ -202,7 +245,7 @@ class DuckDBAdapter(SQLAdapter):
         ret = []
         for row in cursor.fetchall():
             name, dtype = row[0], row[1]
-            ret.append(Column.create(name, dtype))
+            ret.append(DuckDBColumn.create(name, dtype))
         return ret
 
     @classmethod
@@ -210,10 +253,61 @@ class DuckDBAdapter(SQLAdapter):
         """Render the given constraint as DDL text. Should be overriden by adapters which need custom constraint
         rendering."""
         if constraint.type == ConstraintType.foreign_key:
-            # DuckDB doesn't support 'foreign key' as an alias
-            return f"references {constraint.expression}"
+            if constraint.to and constraint.to_columns:
+                # TODO: this is a hack to get around a limitation in DuckDB around setting FKs
+                # across databases.
+                pieces = constraint.to.split(".")
+                if len(pieces) > 2:
+                    constraint_to = ".".join(pieces[1:])
+                else:
+                    constraint_to = constraint.to
+                return f"references {constraint_to} ({', '.join(constraint.to_columns)})"
+            else:
+                return f"references {constraint.expression}"
         else:
             return super().render_column_constraint(constraint)
+
+    def _clean_up_temp_relation_for_incremental(self, config):
+        if self.is_motherduck() and hasattr(config, "model"):
+            if "incremental" == config.model.get_materialization():
+                temp_relation = self.Relation(
+                    path=self.get_temp_relation_path(config.model),
+                    type=RelationType.Table,
+                )
+                self.drop_relation(temp_relation)
+
+    def pre_model_hook(self, config: Any) -> None:
+        """A hook for getting the temp schema name from the model config.
+        Cleans up the remote temporary table on MotherDuck before running
+        an incremental model.
+        """
+        if hasattr(config, "model"):
+            self._temp_schema_name = config.model.config.meta.get(
+                TEMP_SCHEMA_NAME, self._temp_schema_name
+            )
+            self._clean_up_temp_relation_for_incremental(config)
+        super().pre_model_hook(config)
+
+    @available
+    def get_temp_relation_path(self, model: Any):
+        """This is a workaround to enable incremental models on MotherDuck because it
+        currently doesn't support remote temporary tables. Instead we use a regular
+        table that is dropped at the end of the incremental macro or post-model hook.
+        """
+        # Add a unique identifier for this model (scoped per dbt run)
+        _uuid = self._temp_schema_model_uuid[model.identifier]
+        return Path(
+            schema=self._temp_schema_name,
+            database=model.database,
+            identifier=f"{model.identifier}__{_uuid}",
+        )
+
+    def post_model_hook(self, config: Any, context: Any) -> None:
+        """A hook for cleaning up the remote temporary table on MotherDuck if the
+        incremental model materialization fails to do so.
+        """
+        self._clean_up_temp_relation_for_incremental(config)
+        super().post_model_hook(config, context)
 
 
 # Change `table_a/b` to `table_aaaaa/bbbbb` to avoid duckdb binding issues when relation_a/b

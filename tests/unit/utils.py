@@ -4,10 +4,9 @@ Note that all imports should be inside the functions to avoid import/mocking
 issues.
 """
 import os
-from unittest import TestCase, mock
+from unittest import mock
 
 from dbt.config.project import PartialProject
-from hologram import ValidationError
 
 
 def normalize(path):
@@ -38,7 +37,6 @@ def profile_from_dict(profile, profile_name, cli_vars="{}"):
     from dbt.config import Profile
     from dbt.config.renderer import ProfileRenderer
     from dbt.config.utils import parse_cli_vars
-    from dbt.context.base import generate_base_context
 
     if not isinstance(cli_vars, dict):
         cli_vars = parse_cli_vars(cli_vars)
@@ -119,33 +117,6 @@ def inject_adapter(value, plugin):
 
     key = value.type()
     FACTORY.adapters[key] = value
-
-
-class ContractTestCase(TestCase):
-    ContractType = None
-
-    def setUp(self):
-        self.maxDiff = None
-        super().setUp()
-
-    def assert_to_dict(self, obj, dct):
-        self.assertEqual(obj.to_dict(), dct)
-
-    def assert_from_dict(self, obj, dct, cls=None):
-        if cls is None:
-            cls = self.ContractType
-        self.assertEqual(cls.from_dict(dct), obj)
-
-    def assert_symmetric(self, obj, dct, cls=None):
-        self.assert_to_dict(obj, dct)
-        self.assert_from_dict(obj, dct, cls)
-
-    def assert_fails_validation(self, dct, cls=None):
-        if cls is None:
-            cls = self.ContractType
-
-        with self.assertRaises(ValidationError):
-            cls.from_dict(dct)
 
 
 def generate_name_macros(package):

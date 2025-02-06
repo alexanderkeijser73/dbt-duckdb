@@ -47,6 +47,7 @@ coverage.xml
 *,cover
 .hypothesis/
 test.env
+.mypy_cache/
 
 # Translations
 *.mo
@@ -78,3 +79,6 @@ target/
 .DS_Store
 .idea/
 .vscode/
+.env
+
+.venv

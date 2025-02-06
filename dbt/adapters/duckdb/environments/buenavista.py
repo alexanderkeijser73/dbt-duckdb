@@ -5,7 +5,8 @@ import psycopg2
 from . import Environment
 from .. import credentials
 from .. import utils
-from dbt.contracts.connection import AdapterResponse
+from dbt.adapters.contracts.connection import AdapterResponse
+from dbt.adapters.contracts.connection import Connection
 
 
 class BVEnvironment(Environment):
@@ -20,7 +21,7 @@ class BVEnvironment(Environment):
         )
 
     def __init__(self, credentials: credentials.DuckDBCredentials):
-        self.creds = credentials
+        super().__init__(credentials)
         if not self.creds.remote:
             raise Exception("BVConnection only works with a remote host")
 
@@ -30,6 +31,13 @@ class BVEnvironment(Environment):
         cursor = self.initialize_cursor(self.creds, conn.cursor())
         cursor.close()
         return conn
+
+    def is_cancelable(cls):
+        return False
+
+    @classmethod
+    def cancel(cls, connection: Connection):
+        pass
 
     def get_binding_char(self) -> str:
         return "%s"
@@ -54,6 +62,20 @@ class BVEnvironment(Environment):
             "params": {
                 "plugin_name": plugin_name,
                 "source_config": source_config.as_dict(),
+            },
+        }
+        cursor = handle.cursor()
+        cursor.execute(json.dumps(payload))
+        cursor.close()
+        handle.close()
+
+    def store_relation(self, plugin_name: str, target_config: utils.TargetConfig) -> None:
+        handle = self.handle()
+        payload = {
+            "method": "dbt_store_relation",
+            "params": {
+                "plugin_name": plugin_name,
+                "target_config": target_config.as_dict(),
             },
         }
         cursor = handle.cursor()
