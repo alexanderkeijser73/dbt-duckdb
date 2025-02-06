@@ -32,7 +32,7 @@ class DuckDBConnectionManager(SQLConnectionManager):
     def __init__(self, config: AdapterRequiredConfig, mp_context: SpawnContext) -> None:
         super().__init__(config, mp_context)
         self.disable_transactions = config.credentials.disable_transactions  # type: ignore
-        if profile.credentials.emulate:
+        if config.credentials.emulate:
             print("Emulating: " + config.credentials.emulate)
             from sqlglot import transpile
             read = config.credentials.emulate
