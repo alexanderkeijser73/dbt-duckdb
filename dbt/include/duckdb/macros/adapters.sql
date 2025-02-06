@@ -115,7 +115,7 @@ def materialize(df, con):
   {%- set sql_header = config.get('sql_header', none) -%}
 
   {{ sql_header if sql_header is not none }}
-  create view {{ relation.include(database=adapter.use_database()) }} as (
+  create view {{ relation }} as (
     {{ adapter.transpile(sql) }}
   );
 {% endmacro %}
