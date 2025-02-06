@@ -70,6 +70,10 @@ class DuckDBAdapter(SQLAdapter):
         return self.config.credentials.is_motherduck
 
     @available
+    def transpile(self, sql: str) -> str:
+        return self.connections.transpile(sql)
+
+    @available
     def convert_datetimes_to_strs(self, table: "agate.Table") -> "agate.Table":
         import agate
 

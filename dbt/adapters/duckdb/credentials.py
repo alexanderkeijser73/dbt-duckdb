@@ -139,6 +139,11 @@ class DuckDBCredentials(Credentials):
     # created by SQL or Python models; see the plugins module for more details.
     plugins: Optional[List[PluginConfig]] = None
 
+    # Whether to emulate a different database type (e.g., snowflake) for the syntax
+    # of the SQL queries for models; this is useful for testing snowflake-based
+    # dbt projects using dbt-duckdb
+    emulate: Optional[str] = None
+
     # Whether to disable transactions when executing SQL statements; this
     # is useful when we would like the resulting DuckDB database file to
     # be as small as possible.

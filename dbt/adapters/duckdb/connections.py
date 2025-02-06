@@ -28,9 +28,17 @@ class DuckDBConnectionManager(SQLConnectionManager):
     _ENV = None
     _LOGGED_MESSAGES: Set[str] = set()
 
+
     def __init__(self, config: AdapterRequiredConfig, mp_context: SpawnContext) -> None:
         super().__init__(config, mp_context)
         self.disable_transactions = config.credentials.disable_transactions  # type: ignore
+        if config.credentials.emulate:
+            print("Emulating: " + config.credentials.emulate)
+            from sqlglot import transpile
+            read = config.credentials.emulate
+            self.transpile = lambda sql: transpile(sql, read=read, write="duckdb")[0]
+        else:
+            self.transpile = lambda sql: sql
 
     @classmethod
     def env(cls) -> environments.Environment:
@@ -125,6 +133,10 @@ class DuckDBConnectionManager(SQLConnectionManager):
         fetch: bool = False,
         limit: Optional[int] = None,
     ) -> Tuple[AdapterResponse, "agate.Table"]:
+        if fetch:
+            # We need to apply transpiling to fetched SQL; DDL/DML should have had
+            # translation applied at an earlier step in the sequence
+            sql = self.transpile(sql)
         if self.disable_transactions:
             auto_begin = False
         return super().execute(sql, auto_begin, fetch, limit)

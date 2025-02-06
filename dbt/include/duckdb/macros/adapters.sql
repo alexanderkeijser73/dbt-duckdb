@@ -74,11 +74,11 @@
     {#-- DuckDB doesnt support constraints on temp tables --#}
     {{ get_table_columns_and_constraints() }} ;
     insert into {{ relation }} {{ get_column_names() }} (
-      {{ get_select_subquery(compiled_code) }}
+      {{ adapter.transpile(get_select_subquery(compiled_code)) }}
     );
   {% else %}
     as (
-      {{ compiled_code }}
+      {{ adapter.transpile(compiled_code) }}
     );
   {% endif %}
   {%- elif language == 'python' -%}
@@ -116,7 +116,7 @@ def materialize(df, con):
 
   {{ sql_header if sql_header is not none }}
   create view {{ relation }} as (
-    {{ sql }}
+    {{ adapter.transpile(sql) }}
   );
 {% endmacro %}
 
